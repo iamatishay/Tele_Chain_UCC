@@ -1,55 +1,22 @@
 """
-Telechain Prototype (single-file) with Basic JWT Authentication and SMS API
+Telechain Prototype (single-file) with Basic JWT Authentication, SMS API, and Persistent Storage
 
-Features implemented (Python-only prototype):
+Features implemented:
 - In-memory consortium-style blockchain (no PoW) with signed transactions
-- Smart-contract-like Python classes to perform: register telemarketer, register principal & headers,
-  consent request and grant, scrubbing, campaign creation & execution
+- Smart-contract-like Python classes for registration, consent, scrubbing, campaign, SMS send, and TRAI audit
 - OTP simulation for consent acquisition
-- Hashing of phone numbers, per-operator RSA encryption of scrubbed lists
-- Simple token mechanism to represent scrubbing result
-- FastAPI-based HTTP API to interact with components (telemarketer, third-party, operator)
-- Simple persistent storage of ledger to JSON file (optional)
-- Basic JWT-based user authentication (phone as username, bcrypt hashing)
-- NEW: SMS API - Checks consent before simulating SMS send from operator
-
-Requirements:
-pip install fastapi uvicorn cryptography pydantic python-multipart python-jose[cryptography] passlib[bcrypt]
+- Hashing of phone numbers, RSA encryption for operators
+- Basic JWT-based auth (phone + bcrypt)
+- Persistent DB (saved to db_state.json + ledger.json)
+- SMS consent check before simulated send
+- Duplicate prevention for telemarketers (by TRAI ID), principals (by name), headers (per principal), consents (per phone-principal-header)
+- TRAI Audit feature: Generates compliance reports from the ledger (e.g., consent stats, rejected SMS, etc.)
 
 Run:
-uvicorn telechain_prototype:app --reload --port 8000
-
-New Endpoints for Auth:
-- POST /users/register {"phone": "9876543210", "password": "1234"} → Returns JWT token
-- POST /users/login {"phone": "9876543210", "password": "1234"} → Returns JWT token
-
-Protected Endpoints (require Authorization: Bearer <token>):
-- GET /consent/preferences/{phone}
-- POST /consent/update
-
-Other Endpoints (examples, unchanged):
-- POST /telemarketer/register  {"name": "TM1", "trai_id": "TRAIX123", "deposit": 1000}
-- POST /principal/register  {"name": "Biz1"}
-- POST /principal/register_header {"principal_id": "PR-1", "header": "BIZHDR"}
-- POST /consent/request {"principal_id": "PR-1", "header": "BIZHDR", "phone": "9876543210"}
-- POST /consent/grant   {"phone": "9876543210", "otp": "123456", "principal_id": "PR-1", "header": "BIZHDR"}
-- POST /scrub           {"telemarketer_id": "TM-1", "principal_id":"PR-1", "header": "BIZHDR", "content_id":"CT-1", "phones": ["9876543210","9876543211"]}
-- POST /campaign/create {"telemarketer_id":"TM-1","token":"<token-from-scrub>","operator":"OperatorA"}
-- POST /campaign/execute {"operator":"OperatorA","token":"<token>","telemarketer_id":"TM-1"}
-- GET  /ledger
-- NEW: POST /sms/send {"operator": "OperatorA", "phone": "9876543210", "principal_id": "PR-1", "header": "HDR-1", "message": "Promo!"}
-
-Notes & limitations:
-- This prototype is intentionally simplified for demonstration and testing only.
-- Security: keys are generated at runtime. Do NOT use in production. JWT secret is hardcoded—change it!
-- Persistence is minimal; restart loses in-memory data unless ledger.json is saved. Users are in-memory.
-- Auth: Phone serves as username. Only protects customer dashboard endpoints; others are open for demo.
-- SMS: Simulated (no real sending); logs to ledger for audit. In production, integrate with Twilio/etc. after consent check.
-- UI Integration: Update Streamlit to send POST /users/login and use Bearer token in headers for protected calls.
-- Bcrypt Fix: Attempts to seed default user; if fails (e.g., Python 3.13+), register via UI/API.
+    uvicorn telechain_prototype_persistent:app --reload --port 8000
 """
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -59,35 +26,34 @@ import hashlib
 import uuid
 import os
 import base64
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives import asymmetric
-from cryptography.hazmat.primitives import hmac
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import secrets
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization, hashes
+from collections import Counter
 
+# ----------------------------- App Setup -----------------------------
 APP_LEDGER_FILE = "ledger.json"
+DB_FILE = "db_state.json"
 
 app = FastAPI(title="Telechain Prototype API")
 
-# ----------------------------- Security Configuration -----------------------------
-SECRET_KEY = "your-secret-key-change-in-prod-telechain-demo"  # Change this! Use secrets.token_urlsafe(32)
+# ----------------------------- Security Config -----------------------------
+SECRET_KEY = "your-secret-key-change-in-prod-telechain-demo"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
-# ----------------------------- Utility functions -----------------------------
+# ----------------------------- Utility Functions -----------------------------
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
 
 def sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
-# JWT Utilities
+# JWT helpers
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -96,13 +62,9 @@ def get_password_hash(password):
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     credentials_exception = HTTPException(
@@ -117,15 +79,31 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    # Check if user exists in DB
     if phone not in DB["users"]:
         raise credentials_exception
     return phone
 
-# ----------------------------- Simple Blockchain -----------------------------
-class Block(dict):
-    pass
+# ----------------------------- Persistent Storage -----------------------------
+def save_db():
+    try:
+        with open(DB_FILE, "w") as f:
+            json.dump(DB, f, indent=2, default=str)
+    except Exception as e:
+        print(f"⚠️ Failed to save DB: {e}")
 
+def load_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r") as f:
+                data = json.load(f)
+                # Merge keys to DB (do not replace the DB reference)
+                for k, v in data.items():
+                    DB[k] = v
+                print("✅ Loaded DB from disk.")
+        except Exception as e:
+            print(f"⚠️ Failed to load DB: {e}")
+
+# ----------------------------- Ledger -----------------------------
 class SimpleLedger:
     def __init__(self):
         self.chain: List[Dict[str, Any]] = []
@@ -159,7 +137,7 @@ class SimpleLedger:
 
 ledger = SimpleLedger()
 
-# ----------------------------- Key management (operators) -----------------------------
+# ----------------------------- RSA Keys for Operators -----------------------------
 class OperatorKeys:
     def __init__(self):
         self.keys: Dict[str, rsa.RSAPrivateKey] = {}
@@ -178,394 +156,503 @@ class OperatorKeys:
     def encrypt_for_operator(self, name: str, data: bytes) -> bytes:
         pub_pem = self.public_pem(name)
         pub = serialization.load_pem_public_key(pub_pem)
-        ct = pub.encrypt(data, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
-        return ct
+        return pub.encrypt(data, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
 
     def decrypt_for_operator(self, name: str, ct: bytes) -> bytes:
         priv = self.ensure_operator(name)
-        pt = priv.decrypt(ct, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
-        return pt
+        return priv.decrypt(ct, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
 
 operator_keys = OperatorKeys()
 
-# ----------------------------- In-memory registry -----------------------------
+# ----------------------------- In-memory DB (will persist) -----------------------------
 DB = {
-    "telemarketers": {},    # id -> {name, trai_id, node_pub}
-    "principals": {},       # id -> {name, headers: [..]}
-    "consents": {},         # phone_hash -> list of {principal_id, header, granted_at, status, txid}
-    "otps": {},             # phone -> {code, expires_at, principal_id, header}
-    "content_templates": {},# content_id -> text
-    "scrub_tokens": {},     # token -> {files_by_operator, txid}
-    "users": {},            # phone -> {password_hash}
+    "telemarketers": {},
+    "principals": {},
+    "consents": {},
+    "otps": {},
+    "content_templates": {},
+    "scrub_tokens": {},
+    "users": {},
+    "campaigns": {},
 }
 
-# ----------------------------- Models -----------------------------
-class RegisterTM(BaseModel):
+# ----------------------------- Pydantic Models (API) -----------------------------
+class RegisterTMModel(BaseModel):
     name: str
     trai_id: str
     deposit: int
 
-class RegisterPrincipal(BaseModel):
+class RegisterPrincipalModel(BaseModel):
     name: str
 
-class RegisterHeader(BaseModel):
+class RegisterHeaderModel(BaseModel):
     principal_id: str
     header: str
 
-class ConsentRequest(BaseModel):
+class ConsentRequestModel(BaseModel):
     principal_id: str
     header: str
     phone: str
 
-class ConsentGrant(BaseModel):
+class ConsentGrantModel(BaseModel):
     phone: str
     otp: str
     principal_id: str
     header: str
 
-class ConsentUpdate(BaseModel):
+class ConsentUpdateModel(BaseModel):
     phone: str
     principal_id: str
     header: str
-    status: str  # e.g., "approved" or "revoked"
+    status: str  # approved / revoked
 
-class ScrubRequest(BaseModel):
+class ScrubRequestModel(BaseModel):
     telemarketer_id: str
     principal_id: str
     header: str
     content_id: str
     phones: List[str]
 
-class CreateCampaign(BaseModel):
+class CreateCampaignModel(BaseModel):
     telemarketer_id: str
     token: str
     operator: str
 
-class ExecuteCampaign(BaseModel):
+class ExecuteCampaignModel(BaseModel):
     operator: str
     token: str
     telemarketer_id: str
 
-# NEW: SMS Send Model
-class SMSSend(BaseModel):
-    operator: str  # e.g., "OperatorA"
-    phone: str     # Customer phone
+class SMSSendModel(BaseModel):
+    operator: str
+    phone: str
     principal_id: str
     header: str
-    message: str   # SMS content
+    message: str
 
-# Auth Models
-class UserCreate(BaseModel):
+class UserCreateModel(BaseModel):
     phone: str
     password: str
 
-class UserLogin(BaseModel):
+class UserLoginModel(BaseModel):
     phone: str
     password: str
 
-class Token(BaseModel):
+class TokenModel(BaseModel):
     access_token: str
     token_type: str
 
-# ----------------------------- Endpoints -----------------------------
+# ----------------------------- Smart-Contract-Like Classes -----------------------------
+class RegistrationContract:
+    def register_telemarketer(self, name: str, trai_id: str, deposit: int):
+        # duplicate TRAI ID prevention
+        for tm_id, tm_data in DB['telemarketers'].items():
+            if tm_data.get("trai_id") == trai_id:
+                raise HTTPException(status_code=400, detail="TRAI ID already registered")
+        tm_id = f"TM-{len(DB['telemarketers'])+1}"
+        DB['telemarketers'][tm_id] = {"name": name, "trai_id": trai_id, "deposit": deposit}
+        save_db()
+        txid = ledger.add_transaction({"type": "telemarketer_register", "tm_id": tm_id, "name": name, "trai_id": trai_id})
+        return {"telemarketer_id": tm_id, "txid": txid}
+
+    def register_principal(self, name: str):
+        # duplicate principal name prevention
+        for pr in DB['principals'].values():
+            if pr.get("name") == name:
+                raise HTTPException(status_code=400, detail="Principal name already registered")
+        pr_id = f"PR-{len(DB['principals'])+1}"
+        DB['principals'][pr_id] = {"name": name, "headers": []}
+        save_db()
+        txid = ledger.add_transaction({"type": "principal_register", "principal_id": pr_id, "name": name})
+        return {"principal_id": pr_id, "txid": txid}
+
+    def register_header(self, principal_id: str, header: str):
+        if principal_id not in DB['principals']:
+            raise HTTPException(status_code=404, detail="Principal not found")
+        if header in DB['principals'][principal_id]['headers']:
+            raise HTTPException(status_code=400, detail="Header already registered for this principal")
+        DB['principals'][principal_id]['headers'].append(header)
+        save_db()
+        txid = ledger.add_transaction({"type": "header_register", "principal_id": principal_id, "header": header})
+        return {"header": header, "txid": txid}
+
+registration_contract = RegistrationContract()
+
+class ConsentContract:
+    def request_consent(self, principal_id: str, header: str, phone: str):
+        if principal_id not in DB['principals'] or header not in DB['principals'][principal_id]['headers']:
+            raise HTTPException(status_code=400, detail="Invalid principal or header")
+        key = sha256_hex(phone)
+        existing = DB['consents'].get(key, [])
+        # prevent duplicate consent request for same phone-principal-header
+        for c in existing:
+            if c.get("principal_id") == principal_id and c.get("header") == header:
+                raise HTTPException(status_code=400, detail="Consent already requested for this phone-principal-header")
+        otp = f"{secrets.randbelow(999999):06d}"
+        expires = datetime.utcnow() + timedelta(minutes=5)
+        existing.append({"principal_id": principal_id, "header": header, "status": "pending", "requested_at": now_iso()})
+        DB['consents'][key] = existing
+        DB['otps'][phone] = {"code": otp, "expires_at": expires.isoformat(), "principal_id": principal_id, "header": header}
+        save_db()
+        txid = ledger.add_transaction({"type": "consent_request", "phone_hash": key, "principal_id": principal_id, "header": header})
+        return {"sent_otp": True, "otp": otp, "txid": txid}
+
+    def grant_consent(self, phone: str, otp: str, principal_id: str, header: str):
+        key = sha256_hex(phone)
+        otp_entry = DB['otps'].get(phone)
+        if not otp_entry:
+            raise HTTPException(status_code=400, detail="No OTP sent or expired")
+        # expiry check
+        try:
+            if datetime.fromisoformat(otp_entry['expires_at'].replace('Z', '+00:00')) < datetime.utcnow():
+                DB['otps'].pop(phone, None)
+                raise HTTPException(status_code=400, detail="OTP expired")
+        except Exception:
+            pass
+        if otp_entry.get('code') != otp or otp_entry.get('principal_id') != principal_id or otp_entry.get('header') != header:
+            raise HTTPException(status_code=400, detail="Invalid OTP or mismatch")
+        consents = DB['consents'].get(key, [])
+        updated = False
+        for c in consents:
+            if c.get("principal_id") == principal_id and c.get("header") == header:
+                c["status"] = "approved"
+                c["granted_at"] = now_iso()
+                updated = True
+                break
+        if not updated:
+            raise HTTPException(status_code=404, detail="Consent request not found")
+        DB['consents'][key] = consents
+        DB['otps'].pop(phone, None)
+        save_db()
+        txid = ledger.add_transaction({"type": "consent_grant", "phone_hash": key, "principal_id": principal_id, "header": header})
+        return {"granted": True, "txid": txid}
+
+    def update_consent(self, phone: str, principal_id: str, header: str, status: str):
+        key = sha256_hex(phone)
+        consents = DB['consents'].get(key, [])
+        updated = False
+        for c in consents:
+            if c.get("principal_id") == principal_id and c.get("header") == header:
+                c["status"] = status
+                if status == "approved" and 'granted_at' not in c:
+                    c['granted_at'] = now_iso()
+                updated = True
+                break
+        if not updated:
+            raise HTTPException(status_code=404, detail="Consent not found")
+        DB['consents'][key] = consents
+        save_db()
+        txid = ledger.add_transaction({"type": "consent_update", "phone_hash": key, "principal_id": principal_id, "header": header, "status": status})
+        return {"updated": True, "txid": txid}
+
+    def get_preferences(self, phone: str):
+        key = sha256_hex(phone)
+        return DB['consents'].get(key, [])
+
+consent_contract = ConsentContract()
+
+class ScrubbingContract:
+    def scrub_phones(self, telemarketer_id: str, principal_id: str, header: str, content_id: str, phones: List[str]):
+        if telemarketer_id not in DB['telemarketers']:
+            raise HTTPException(status_code=404, detail="Telemarketer not found")
+        if principal_id not in DB['principals']:
+            raise HTTPException(status_code=404, detail="Principal not found")
+        if header not in DB['principals'][principal_id]['headers']:
+            raise HTTPException(status_code=400, detail="Header not registered under principal")
+        scrubbed = []
+        unscrubbed = []
+        for ph in phones:
+            ph_hash = sha256_hex(ph)
+            cons = DB['consents'].get(ph_hash, [])
+            approved = any(c.get('principal_id') == principal_id and c.get('header') == header and c.get('status') == 'approved' for c in cons)
+            if approved:
+                scrubbed.append(ph_hash)
+            else:
+                unscrubbed.append(ph_hash)
+        token = secrets.token_urlsafe(32)
+        DB['scrub_tokens'][token] = {
+            "telemarketer_id": telemarketer_id,
+            "principal_id": principal_id,
+            "header": header,
+            "content_id": content_id,
+            "scrubbed_phones": scrubbed,
+            "unscrubbed_phones": unscrubbed,
+            "created_at": now_iso()
+        }
+        save_db()
+        txid = ledger.add_transaction({
+            "type": "scrub_request",
+            "telemarketer_id": telemarketer_id,
+            "principal_id": principal_id,
+            "header": header,
+            "content_id": content_id,
+            "scrubbed_count": len(scrubbed),
+            "unscrubbed_count": len(unscrubbed)
+        })
+        return {"scrub_token": token, "scrubbed_count": len(scrubbed), "unscrubbed_count": len(unscrubbed), "txid": txid}
+
+scrubbing_contract = ScrubbingContract()
+
+class CampaignContract:
+    def create_campaign(self, telemarketer_id: str, token: str, operator: str):
+        if telemarketer_id not in DB['telemarketers']:
+            raise HTTPException(status_code=404, detail="Telemarketer not found")
+        if token not in DB['scrub_tokens']:
+            raise HTTPException(status_code=404, detail="Scrub token not found")
+        scrub = DB['scrub_tokens'][token]
+        if scrub.get('telemarketer_id') != telemarketer_id:
+            raise HTTPException(status_code=403, detail="Unauthorized scrub token access")
+        campaign_id = f"CMP-{len(DB['campaigns'])+1}"
+        DB['campaigns'][campaign_id] = {
+            "telemarketer_id": telemarketer_id,
+            "scrub_token": token,
+            "operator": operator,
+            "status": "created",
+            "created_at": now_iso()
+        }
+        save_db()
+        txid = ledger.add_transaction({"type": "campaign_create", "campaign_id": campaign_id, "telemarketer_id": telemarketer_id, "operator": operator})
+        return {"campaign_id": campaign_id, "txid": txid}
+
+    def execute_campaign(self, operator: str, token: str, telemarketer_id: str):
+        if token not in DB['scrub_tokens']:
+            raise HTTPException(status_code=404, detail="Scrub token not found")
+        scrub = DB['scrub_tokens'][token]
+        if scrub.get('telemarketer_id') != telemarketer_id:
+            raise HTTPException(status_code=403, detail="Unauthorized scrub token access")
+        # find campaign
+        campaign_id = None
+        for cid, c in DB['campaigns'].items():
+            if c.get('scrub_token') == token and c.get('operator') == operator:
+                campaign_id = cid
+                campaign = c
+                break
+        if not campaign_id:
+            raise HTTPException(status_code=404, detail="Campaign not found for this token/operator")
+        if campaign.get('status') != 'created':
+            raise HTTPException(status_code=400, detail="Campaign already executed or invalid status")
+        sent_count = len(scrub.get('scrubbed_phones', []))
+        campaign['status'] = 'executed'
+        campaign['executed_at'] = now_iso()
+        campaign['sent_count'] = sent_count
+        DB['campaigns'][campaign_id] = campaign
+        save_db()
+        txid = ledger.add_transaction({"type": "campaign_execute", "campaign_id": campaign_id, "operator": operator, "sent_count": sent_count})
+        return {"executed": True, "sent_count": sent_count, "txid": txid}
+
+campaign_contract = CampaignContract()
+
+class SMSSendContract:
+    def send_sms(self, operator: str, phone: str, principal_id: str, header: str, message: str):
+        operator_keys.ensure_operator(operator)
+        phone_hash = sha256_hex(phone)
+        consents = DB.get('consents', {}).get(phone_hash, [])
+        approved = next((c for c in consents if c.get('principal_id') == principal_id and c.get('header') == header and c.get('status') == 'approved'), None)
+        if not approved:
+            txid = ledger.add_transaction({"type": "sms_rejected", "operator": operator, "phone_hash": phone_hash, "principal_id": principal_id, "header": header, "reason": "consent_not_granted"})
+            save_db()
+            raise HTTPException(status_code=400, detail="Consent not granted")
+        # Simulate send: log to ledger, encrypt message to operator
+        encrypted_msg = operator_keys.encrypt_for_operator(operator, message.encode())
+        msg_b64 = base64.b64encode(encrypted_msg).decode()
+        txid = ledger.add_transaction({"type": "sms_sent", "operator": operator, "phone_hash": phone_hash, "principal_id": principal_id, "header": header, "message_hash": sha256_hex(message)})
+        save_db()
+        return {"sent": True, "txid": txid, "encrypted_message": msg_b64}
+
+sms_send_contract = SMSSendContract()
+
+from collections import Counter
+from datetime import datetime
+from typing import Optional
+
+from datetime import datetime, timezone
+from collections import Counter
+from typing import Optional
+
+class TRAIAuditContract:
+    """Generates TRAI compliance reports from the ledger."""
+
+    def generate_report(self, from_date: Optional[str] = None, to_date: Optional[str] = None):
+        chain = ledger.get_chain()
+
+        # -------------------- Date Filtering --------------------
+        start = datetime.min.replace(tzinfo=timezone.utc)
+        end = datetime.max.replace(tzinfo=timezone.utc)
+
+        if from_date:
+            start = datetime.fromisoformat(str(from_date).replace('Z', '+00:00'))
+        if to_date:
+            end = datetime.fromisoformat(str(to_date).replace('Z', '+00:00'))
+
+        filtered_chain = []
+        for tx in chain:
+            ts = tx.get("timestamp")
+            if not ts:
+                continue  # skip if timestamp missing
+            try:
+                tx_time = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                if start <= tx_time <= end:
+                    filtered_chain.append(tx)
+            except Exception:
+                continue
+
+        # -------------------- Counters --------------------
+        tx_types = Counter()
+        consents_by_status = Counter()
+        sms_rejected_reasons = Counter()
+        telemarketer_activity = Counter()
+        principal_activity = Counter()
+
+        for tx in filtered_chain:
+            ttype = tx.get("type", "unknown")
+            tx_types[ttype] += 1
+
+            # Consent stats
+            if ttype == "consent_request":
+                consents_by_status["requested"] += 1
+            elif ttype in ("consent_grant", "consent_update"):
+                status = tx.get("status", "approved" if ttype == "consent_grant" else "unknown")
+                consents_by_status[status] += 1
+
+            # SMS rejections
+            if ttype == "sms_rejected":
+                reason = tx.get("reason", "unknown")
+                sms_rejected_reasons[reason] += 1
+
+            # Telemarketer activity
+            if ttype == "telemarketer_register":
+                telemarketer_activity[tx.get("tm_id", "unknown")] += 1
+
+            # Principal activity
+            if ttype == "principal_register":
+                principal_activity[tx.get("principal_id", "unknown")] += 1
+
+        # -------------------- Report --------------------
+        report = {
+            "summary": {
+                "total_transactions": len(filtered_chain),
+                "by_type": dict(tx_types),
+            },
+            "consent_stats": dict(consents_by_status),
+            "sms_rejections": dict(sms_rejected_reasons),
+            "telemarketer_activity": dict(telemarketer_activity),
+            "principal_activity": dict(principal_activity),
+        }
+
+        return report
+
+# Instantiate for FastAPI usage
+trai_audit_contract = TRAIAuditContract()
+
+# ----------------------------- FastAPI Endpoints -----------------------------
+# Auth endpoints
+@app.post("/users/register", response_model=TokenModel)
+def register_user(u: UserCreateModel):
+    if u.phone in DB['users']:
+        raise HTTPException(status_code=400, detail="Phone already registered")
+    DB['users'][u.phone] = {"password_hash": get_password_hash(u.password)}
+    save_db()
+    access_token = create_access_token({"sub": u.phone}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    txid = ledger.add_transaction({"type": "user_register", "phone_hash": sha256_hex(u.phone)})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/users/login", response_model=TokenModel)
+def login_user(u: UserLoginModel):
+    rec = DB['users'].get(u.phone)
+    if not rec or not verify_password(u.password, rec.get('password_hash', '')):
+        raise HTTPException(status_code=400, detail="Incorrect phone or password")
+    access_token = create_access_token({"sub": u.phone}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# Registration endpoints
 @app.post("/telemarketer/register")
-def register_telemarketer(r: RegisterTM):
-    tm_id = f"TM-{len(DB['telemarketers'])+1}"
-    DB['telemarketers'][tm_id] = {"name": r.name, "trai_id": r.trai_id, "deposit": r.deposit}
-    tx = {"type": "telemarketer_register", "tm_id": tm_id, "name": r.name, "trai_id": r.trai_id}
-    txid = ledger.add_transaction(tx)
-    return {"telemarketer_id": tm_id, "txid": txid}
+def api_register_tm(r: RegisterTMModel):
+    res = registration_contract.register_telemarketer(r.name, r.trai_id, r.deposit)
+    return res
 
 @app.post("/principal/register")
-def register_principal(r: RegisterPrincipal):
-    pr_id = f"PR-{len(DB['principals'])+1}"
-    DB['principals'][pr_id] = {"name": r.name, "headers": []}
-    tx = {"type": "principal_register", "principal_id": pr_id, "name": r.name}
-    txid = ledger.add_transaction(tx)
-    return {"principal_id": pr_id, "txid": txid}
+def api_register_principal(r: RegisterPrincipalModel):
+    res = registration_contract.register_principal(r.name)
+    return res
 
 @app.post("/principal/register_header")
-def register_header(r: RegisterHeader):
-    if r.principal_id not in DB['principals']:
-        raise HTTPException(status_code=404, detail="principal not found")
-    DB['principals'][r.principal_id]['headers'].append(r.header)
-    tx = {"type": "header_register", "principal_id": r.principal_id, "header": r.header}
-    txid = ledger.add_transaction(tx)
-    return {"header": r.header, "txid": txid}
+def api_register_header(r: RegisterHeaderModel):
+    res = registration_contract.register_header(r.principal_id, r.header)
+    return res
 
+# Consent endpoints
 @app.post("/consent/request")
-def consent_request(r: ConsentRequest):
-    # Check if header is registered
-    if r.principal_id not in DB['principals'] or r.header not in DB['principals'][r.principal_id]['headers']:
-        raise HTTPException(status_code=400, detail="principal or header not registered")
-    # Simulate OTP send
-    code = f"{secrets.randbelow(999999):06d}"
-    expires = datetime.utcnow() + timedelta(minutes=5)
-    key = sha256_hex(r.phone)
-    DB['consents'].setdefault(key, [])
-    # Check for existing consent for this principal/header
-    existing = next((c for c in DB['consents'][key] if c['principal_id'] == r.principal_id and c['header'] == r.header), None)
-    if existing:
-        if existing['status'] == 'pending':
-            # Update OTP for existing pending consent
-            DB['otps'][r.phone] = {"code": code, "expires_at": expires.isoformat(), "principal_id": r.principal_id, "header": r.header}
-        else:
-            raise HTTPException(status_code=400, detail="Consent already exists and not pending")
-    else:
-        # Create new pending consent
-        entry = {"principal_id": r.principal_id, "header": r.header, "requested_at": now_iso(), "status": "pending"}
-        DB['consents'][key].append(entry)
-        DB['otps'][r.phone] = {"code": code, "expires_at": expires.isoformat(), "principal_id": r.principal_id, "header": r.header}
-    tx = {"type": "consent_request", "principal_id": r.principal_id, "header": r.header, "phone_hash": key}
-    txid = ledger.add_transaction(tx)
-    return {"sent_otp": True, "otp": code, "txid": txid}  # otp returned for demo; in real-world you won't return it
+def api_consent_request(r: ConsentRequestModel):
+    return consent_contract.request_consent(r.principal_id, r.header, r.phone)
 
 @app.post("/consent/grant")
-def consent_grant(r: ConsentGrant):
-    key = sha256_hex(r.phone)
-    consents = DB['consents'].get(key, [])
-    matching = next((c for c in consents if c['principal_id'] == r.principal_id and c['header'] == r.header and c['status'] == 'pending'), None)
-    if not matching:
-        raise HTTPException(status_code=400, detail="No pending consent found for this principal/header")
-    # Check OTP
-    rec = DB['otps'].get(r.phone)
-    if not rec or datetime.fromisoformat(rec['expires_at'].replace('Z', '+00:00')) < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="invalid or expired otp")
-    if rec['code'] != r.otp or rec['principal_id'] != r.principal_id or rec['header'] != r.header:
-        raise HTTPException(status_code=400, detail="invalid otp")
-    # Update to approved
-    matching['status'] = "approved"
-    matching['granted_at'] = now_iso()
-    tx = {"type": "consent_grant", "principal_id": r.principal_id, "header": r.header, "phone_hash": key, "status": "approved"}
-    txid = ledger.add_transaction(tx)
-    # Clean up OTP
-    if r.phone in DB['otps']:
-        del DB['otps'][r.phone]
-    return {"granted": True, "txid": txid}
-
-@app.get("/consent/preferences/{phone}")
-async def get_consent_preferences(phone: str, current_user: str = Depends(get_current_user)):
-    if sha256_hex(phone) != sha256_hex(current_user):
-        raise HTTPException(status_code=403, detail="Access denied: Can only view own preferences")
-    key = sha256_hex(phone)
-    prefs = DB['consents'].get(key, [])
-    return [{"principal_id": p['principal_id'], "header": p['header'], "status": p.get('status', 'unknown'), "granted_at": p.get('granted_at')} for p in prefs]
+def api_consent_grant(r: ConsentGrantModel):
+    return consent_contract.grant_consent(r.phone, r.otp, r.principal_id, r.header)
 
 @app.post("/consent/update")
-async def consent_update(r: ConsentUpdate, current_user: str = Depends(get_current_user)):
+def api_consent_update(r: ConsentUpdateModel, current_user: str = Depends(get_current_user)):
+    # Only allow updating own phone consents
     if sha256_hex(r.phone) != sha256_hex(current_user):
-        raise HTTPException(status_code=403, detail="Access denied: Can only update own consents")
-    key = sha256_hex(r.phone)
-    consents = DB['consents'].get(key, [])
-    updated = False
-    for c in consents:
-        if c['principal_id'] == r.principal_id and c['header'] == r.header:
-            c['status'] = r.status
-            if r.status == "approved" and 'granted_at' not in c:
-                c['granted_at'] = now_iso()
-            updated = True
-            break
-    if not updated:
-        raise HTTPException(status_code=404, detail="consent not found for this principal/header")
-    tx = {"type": "consent_update", "phone_hash": key, "principal_id": r.principal_id, "header": r.header, "status": r.status}
-    txid = ledger.add_transaction(tx)
-    return {"updated": True, "txid": txid}
+        raise HTTPException(status_code=403, detail="Cannot update other user's consents")
+    return consent_contract.update_consent(r.phone, r.principal_id, r.header, r.status)
 
-@app.post("/content/register")
-def register_content(data: Dict[str, Any]):
-    cid = f"CT-{len(DB['content_templates'])+1}"
-    DB['content_templates'][cid] = data.get('text', '')
-    tx = {"type": "content_register", "content_id": cid, "text_hash": sha256_hex(DB['content_templates'][cid])}
-    txid = ledger.add_transaction(tx)
-    return {"content_id": cid, "txid": txid}
+@app.get("/consent/preferences/{phone}")
+def api_get_preferences(phone: str, current_user: str = Depends(get_current_user)):
+    # Only allow viewing own preferences
+    if sha256_hex(phone) != sha256_hex(current_user):
+        raise HTTPException(status_code=403, detail="Cannot view other user's preferences")
+    return consent_contract.get_preferences(phone)
 
+# Scrub & Campaign endpoints
 @app.post("/scrub")
-def scrub(req: ScrubRequest):
-    # Basic ownership checks
-    if req.telemarketer_id not in DB['telemarketers']:
-        raise HTTPException(status_code=404, detail="telemarketer not found")
-    if req.principal_id not in DB['principals']:
-        raise HTTPException(status_code=404, detail="principal not found")
-    if req.header not in DB['principals'][req.principal_id]['headers']:
-        raise HTTPException(status_code=400, detail="header not registered under principal")
-    # Process numbers
-    valid_by_operator = {}
-    invalid = []
-    for p in req.phones:
-        h = sha256_hex(p)
-        found = False
-        for c in DB['consents'].get(h, []):
-            if (c['principal_id'] == req.principal_id and 
-                c['header'] == req.header and 
-                c.get('status') == "approved"):
-                found = True
-                break
-        if found:
-            # Choose operator by last digit (demo split)
-            op = "OperatorA" if int(p[-1]) % 2 == 0 else "OperatorB"
-            valid_by_operator.setdefault(op, []).append(p)
-        else:
-            invalid.append(p)
-    # Create files: encrypt per operator and create digests
-    files_meta = {}
-    for op, nums in valid_by_operator.items():
-        payload = json.dumps(nums).encode()
-        ct = operator_keys.encrypt_for_operator(op, payload)
-        digest = sha256_hex(base64.b64encode(ct).decode())
-        files_meta[op] = {"encrypted_blob_b64": base64.b64encode(ct).decode(), "digest": digest}
-    token = f"TK-{uuid.uuid4()}"
-    tx = {"type": "scrub_tx", "telemarketer_id": req.telemarketer_id, "principal_id": req.principal_id, "header": req.header, "content_id": req.content_id, "files_meta": {k:{"digest":v['digest']} for k,v in files_meta.items()}, "invalid_count": len(invalid)}
-    txid = ledger.add_transaction(tx)
-    DB['scrub_tokens'][token] = {"files_meta": files_meta, "txid": txid, "invalid": invalid}
-    return {"token": token, "txid": txid, "valid_counts": {k: len(v) for k,v in valid_by_operator.items()}, "invalid": invalid}
+def api_scrub(r: ScrubRequestModel):
+    return scrubbing_contract.scrub_phones(r.telemarketer_id, r.principal_id, r.header, r.content_id, r.phones)
 
 @app.post("/campaign/create")
-def campaign_create(req: CreateCampaign):
-    if req.telemarketer_id not in DB['telemarketers']:
-        raise HTTPException(status_code=404, detail="telemarketer not found")
-    token_info = DB['scrub_tokens'].get(req.token)
-    if not token_info:
-        raise HTTPException(status_code=404, detail="token not found")
-    # Operator gets token; record transaction
-    tx = {"type": "campaign_create", "telemarketer_id": req.telemarketer_id, "operator": req.operator, "token": req.token}
-    txid = ledger.add_transaction(tx)
-    return {"accepted": True, "txid": txid}
+def api_campaign_create(r: CreateCampaignModel):
+    return campaign_contract.create_campaign(r.telemarketer_id, r.token, r.operator)
 
 @app.post("/campaign/execute")
-def campaign_execute(req: ExecuteCampaign):
-    token_info = DB['scrub_tokens'].get(req.token)
-    if not token_info:
-        raise HTTPException(status_code=404, detail="token not found")
-    # Operator decrypts their blob and 'sends'
-    if req.operator not in token_info['files_meta']:
-        raise HTTPException(status_code=400, detail="no numbers for this operator")
-    ct_b64 = token_info['files_meta'][req.operator].get('encrypted_blob_b64')
-    if not ct_b64:
-        raise HTTPException(status_code=400, detail="encrypted blob missing")
-    ct = base64.b64decode(ct_b64)
-    pts = operator_keys.decrypt_for_operator(req.operator, ct)
-    nums = json.loads(pts.decode())
-    # Build delivery report
-    delivered = len(nums)
-    tx = {"type": "campaign_execute", "operator": req.operator, "telemarketer_id": req.telemarketer_id, "token": req.token, "delivered": delivered}
-    txid = ledger.add_transaction(tx)
-    return {"delivered": delivered, "txid": txid}
+def api_campaign_execute(r: ExecuteCampaignModel):
+    return campaign_contract.execute_campaign(r.operator, r.token, r.telemarketer_id)
 
-# NEW: SMS Send Endpoint - Checks consent before simulating SMS
+# SMS send endpoint
 @app.post("/sms/send")
-def send_sms(req: SMSSend):
-    # Validate operator exists (ensure keys for it)
-    try:
-        operator_keys.ensure_operator(req.operator)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid operator")
+def api_send_sms(r: SMSSendModel):
+    return sms_send_contract.send_sms(r.operator, r.phone, r.principal_id, r.header, r.message)
 
-    # Hash phone for privacy and lookup
-    phone_hash = sha256_hex(req.phone)
-    consents = DB['consents'].get(phone_hash, [])
-
-    # Check for approved consent for this exact principal_id and header
-    approved_consent = next(
-        (c for c in consents 
-         if c['principal_id'] == req.principal_id 
-         and c['header'] == req.header 
-         and c.get('status') == "approved"), 
-        None
-    )
-
-    if not approved_consent:
-        # Log rejection to ledger
-        reject_tx = {
-            "type": "sms_rejected",
-            "operator": req.operator,
-            "phone_hash": phone_hash,
-            "principal_id": req.principal_id,
-            "header": req.header,
-            "message_hash": sha256_hex(req.message),
-            "reason": "consent not granted"
-        }
-        ledger.add_transaction(reject_tx)
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Consent not granted for principal '{req.principal_id}' and header '{req.header}'. SMS rejected."
-        )
-
-    # Consent approved: Simulate SMS send (log to ledger)
-    message_hash = sha256_hex(req.message)
-    send_tx = {
-        "type": "sms_sent",
-        "operator": req.operator,
-        "phone_hash": phone_hash,
-        "principal_id": req.principal_id,
-        "header": req.header,
-        "message_hash": message_hash,
-        "consent_granted_at": approved_consent.get('granted_at')
-    }
-    txid = ledger.add_transaction(send_tx)
-
-    # In production: Integrate with real SMS gateway (e.g., Twilio) here
-    # For demo: Just return success
-    return {
-        "sent": True, 
-        "txid": txid, 
-        "message": f"SMS sent to {phone_hash[:8]}... from {req.operator} (consent verified)"
-    }
-
+# Ledger & audit
 @app.get("/ledger")
-def get_ledger():
+def api_get_ledger():
     return ledger.get_chain()
 
-# ----------------------------- Auth Endpoints -----------------------------
-@app.post("/users/register", response_model=Token)
-def register_user(user: UserCreate):
-    if user.phone in DB["users"]:
-        raise HTTPException(status_code=400, detail="Phone already registered")
-    hashed_password = get_password_hash(user.password)
-    DB["users"][user.phone] = {"password_hash": hashed_password}
-    # Auto-grant access token on register
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.phone}, expires_delta=access_token_expires
-    )
-    tx = {"type": "user_register", "phone_hash": sha256_hex(user.phone)}
-    ledger.add_transaction(tx)
-    return {"access_token": access_token, "token_type": "bearer"}
+@app.get("/audit/report")
+def api_audit_report(from_date: Optional[str] = Query(None), to_date: Optional[str] = Query(None)):
+    """
+    Returns a TRAI compliance report.
+    Optional ISO date filters:
+        - from_date: "YYYY-MM-DDTHH:MM:SSZ"
+        - to_date: "YYYY-MM-DDTHH:MM:SSZ"
+    """
+    return trai_audit_contract.generate_report(from_date=from_date, to_date=to_date)
 
-@app.post("/users/login", response_model=Token)
-def login_user(user: UserLogin):
-    user_db = DB["users"].get(user.phone)
-    if not user_db or not verify_password(user.password, user_db["password_hash"]):
-        raise HTTPException(
-            status_code=400, detail="Incorrect phone or password"
-        )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.phone}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
-
-# ----------------------------- Simple demo data on startup -----------------------------
+# ----------------------------- Startup -----------------------------
 @app.on_event("startup")
 def startup_event():
-    # Ensure operators exist with keys
+    # load persisted DB first
+    load_db()
+    # ensure operators
     operator_keys.ensure_operator("OperatorA")
     operator_keys.ensure_operator("OperatorB")
-    # Seed a principal and telemarketer for convenience (match UI defaults)
-    pr = {"name": "SeedBiz", "headers": ["HDR-1"]}
-    DB['principals']['PR-1'] = pr
-    DB['telemarketers']['TM-1'] = {"name": "SeedTM", "trai_id": "TR-0001", "deposit": 1000}
-    # Attempt to seed default user for demo (matches UI defaults)
-    try:
-        default_phone = "9876543210"
-        default_password = "1234"
-        if default_phone not in DB["users"]:
-            hashed = get_password_hash(default_password)
-            DB["users"][default_phone] = {"password_hash": hashed}
-            print(f"✅ Default user seeded: phone={default_phone}, password={default_password}")
-    except Exception as e:
-        print(f"⚠️ Failed to seed default user (likely bcrypt issue): {e}. Register via UI/API instead.")
-    ledger.add_transaction({"type": "seed", "msg": "seeded operators, principal PR-1 with HDR-1, telemarketer TM-1, and attempted default user (phone=9876543210, pass=1234)"})
-
+    # seed sample principal/telemarketer/user if not present
+    if "PR-1" not in DB.get("principals", {}):
+        DB["principals"]["PR-1"] = {"name": "SeedBiz", "headers": ["HDR-1"]}
+    if "TM-1" not in DB.get("telemarketers", {}):
+        DB["telemarketers"]["TM-1"] = {"name": "SeedTM", "trai_id": "TR-0001", "deposit": 1000}
+    if "9876543210" not in DB.get("users", {}):
+        DB["users"]["9876543210"] = {"password_hash": get_password_hash("1234")}
+    save_db()
+    ledger.add_transaction({"type": "seed", "msg": "startup seeded defaults if missing"})
 
 if __name__ == "__main__":
     import uvicorn

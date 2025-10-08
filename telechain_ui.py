@@ -30,7 +30,7 @@ def api_headers():
     return {}
 
 # -------------------- Sidebar Navigation --------------------
-menu = st.sidebar.radio("Navigate", ["Setup", "Send Consent Request", "Grant Consent", "Customer Dashboard", "View Ledger"])
+menu = st.sidebar.radio("Navigate", ["Setup", "Send Consent Request", "Grant Consent", "Customer Dashboard", "View Ledger", "TRAI Compliance"])
 
 # -------------------- Setup --------------------
 if menu == "Setup":
@@ -138,14 +138,6 @@ elif menu == "Customer Dashboard":
     st.header("👤 Customer Dashboard")
     st.write("Login to view and manage your consent preferences.")
 
-    # Debug API connection
-    if st.checkbox("Debug: Check API Connection"):
-        if check_api_health():
-            st.success("✅ API is reachable!")
-        else:
-            st.error("❌ API not reachable! Check server on port 8000.")
-
-    # Logged in
     if st.session_state.token and st.session_state.phone:
         if st.button("Logout"):
             st.session_state.token = None
@@ -204,12 +196,10 @@ elif menu == "Customer Dashboard":
             st.session_state.phone = None
             st.rerun()
 
-    # Login/Register
     else:
         tab1, tab2 = st.tabs(["Login", "Register"])
 
         with tab1:
-            st.info("💡 Default demo: phone=9876543210, password=1234")
             phone = st.text_input("Phone Number", value="", key="login_phone")
             password = st.text_input("Password", type="password", value="", key="login_password")
             if st.button("Login", key="btn_login"):
@@ -258,3 +248,58 @@ elif menu == "View Ledger":
             st.error(f"❌ Error {res.status_code}: {res.text}")
     except Exception as e:
         st.error(f"⚠️ Request failed: {e}")
+
+# -------------------- TRAI Compliance Dashboard --------------------
+# -------------------- TRAI Compliance Dashboard --------------------
+# -------------------- TRAI Compliance Dashboard --------------------
+elif menu == "TRAI Compliance":
+    st.header("📊 TRAI Compliance Dashboard")
+    st.write("View consent statistics, SMS sends, blocks, and penalties for audit purposes.")
+
+    from_date = st.date_input("From Date")
+    to_date = st.date_input("To Date")
+
+    if st.button("Generate Compliance Report"):
+        try:
+            params = {
+                "from_date": from_date.isoformat() + "Z",
+                "to_date": to_date.isoformat() + "Z"
+            }
+            res = requests.get(f"{API_URL}/audit/report", params=params, headers=api_headers())
+            if res.status_code == 200:
+                report = res.json()
+
+                # -------------------- Consent Summary --------------------
+                st.subheader("Consent Summary")
+                consent_stats = report.get("consent_stats", {})
+                total = sum(consent_stats.values())
+                st.write(f"Total Consent Requests: {total}")
+                st.write(f"Approved Consents: {consent_stats.get('approved', 0)}")
+                st.write(f"Pending Consents: {consent_stats.get('requested', 0)}")
+                st.write(f"Revoked Consents: {consent_stats.get('revoked', 0)}")
+
+                # -------------------- SMS Rejections --------------------
+                st.subheader("SMS Rejections")
+                sms_rejections = report.get("sms_rejections", {})
+                st.write(f"Rejected SMS (No Consent): {sms_rejections.get('consent_not_granted', 0)}")
+                st.write(f"Other Rejections: {sum(v for k, v in sms_rejections.items() if k != 'consent_not_granted')}")
+
+                # -------------------- Transaction Summary --------------------
+                st.subheader("Transaction Summary")
+                summary = report.get("summary", {})
+                st.write(f"Total Transactions: {summary.get('total_transactions', 0)}")
+                st.write(f"Transactions by Type: {summary.get('by_type', {})}")
+
+                # -------------------- Full Ledger --------------------
+                st.subheader("Full Ledger Entries")
+                # Fetch full ledger if you want detailed transactions
+                ledger_res = requests.get(f"{API_URL}/ledger", headers=api_headers())
+                if ledger_res.status_code == 200:
+                    ledger_data = ledger_res.json()
+                    st.dataframe(ledger_data)
+                else:
+                    st.warning("⚠️ Could not fetch full ledger entries.")
+            else:
+                st.error(f"❌ Error {res.status_code}: {res.text}")
+        except Exception as e:
+            st.error(f"⚠️ Failed to generate report: {e}")
