@@ -4,11 +4,13 @@ from datetime import datetime
 
 API_URL = "http://127.0.0.1:8000"
 
-st.set_page_config(page_title="📡 Telechain Prototype", layout="centered")
-st.title("📡 Telechain Prototype – Blockchain-based Consent Management")
-st.markdown("A decentralized workflow for consent, scrubbing, and campaign execution using blockchain logic.")
+st.set_page_config(page_title="📡 Telechain Prototype", layout="wide")
+st.title("📡 Telechain Prototype – Blockchain Consent Management")
+st.markdown(
+    "Manage telemarketers, principals, headers, consents, campaigns, and TRAI compliance using a blockchain-inspired backend."
+)
 
-# -------------------- Session State Initialization --------------------
+# -------------------- Session State --------------------
 if "token" not in st.session_state:
     st.session_state.token = None
 if "phone" not in st.session_state:
@@ -16,110 +18,112 @@ if "phone" not in st.session_state:
 if "last_otp" not in st.session_state:
     st.session_state.last_otp = None
 
-# -------------------- Helper Functions --------------------
-def check_api_health():
-    try:
-        res = requests.get(f"{API_URL}/ledger", timeout=3)
-        return res.status_code == 200
-    except:
-        return False
-
+# -------------------- Helpers --------------------
 def api_headers():
-    if st.session_state.token:
-        return {"Authorization": f"Bearer {st.session_state.token}"}
-    return {}
+    return {"Authorization": f"Bearer {st.session_state.token}"} if st.session_state.token else {}
+
+def show_status(success: bool, msg: str):
+    if success:
+        st.success(msg)
+    else:
+        st.error(msg)
 
 # -------------------- Sidebar Navigation --------------------
-menu = st.sidebar.radio("Navigate", ["Setup", "Send Consent Request", "Grant Consent", "Customer Dashboard", "View Ledger", "TRAI Compliance"])
+menu = st.sidebar.radio("Navigate", [
+    "Setup",
+    "Send Consent Request",
+    "Grant Consent",
+    "Customer Dashboard",
+    "View Ledger",
+    "TRAI Compliance"
+])
 
 # -------------------- Setup --------------------
 if menu == "Setup":
     st.header("⚙️ Setup – Register Entities")
-    st.write("Register telemarketers, principals, and headers to enable testing.")
+    st.write("Register telemarketers, principals, and headers for testing.")
 
-    tab1, tab2, tab3 = st.tabs(["Register Telemarketer", "Register Principal", "Register Header"])
+    tab1, tab2, tab3 = st.tabs(["Telemarketer", "Principal", "Header"])
 
     with tab1:
         st.subheader("📞 Register Telemarketer")
         tm_name = st.text_input("Telemarketer Name", value="Random TM", key="tm_name")
         trai_id = st.text_input("TRAI ID", value="TRAI-RND-123", key="trai_id")
-        deposit = st.number_input("Deposit (e.g., 1000)", value=1000, min_value=0, key="deposit")
-        if st.button("Register Telemarketer", key="btn_tm"):
+        deposit = st.number_input("Deposit", value=1000, min_value=0, key="deposit")
+        if st.button("Register Telemarketer"):
             payload = {"name": tm_name, "trai_id": trai_id, "deposit": deposit}
             try:
                 res = requests.post(f"{API_URL}/telemarketer/register", json=payload)
                 if res.status_code == 200:
                     data = res.json()
-                    st.success(f"✅ Telemarketer registered! ID: {data['telemarketer_id']}, TXID: {data['txid']}")
+                    show_status(True, f"Telemarketer registered! ID: {data['telemarketer_id']}, TXID: {data['txid']}")
                 else:
-                    st.error(f"❌ Error {res.status_code}: {res.text}")
+                    show_status(False, res.text)
             except Exception as e:
-                st.error(f"⚠️ Request failed: {e}")
+                show_status(False, str(e))
 
     with tab2:
         st.subheader("🏢 Register Principal")
         principal_name = st.text_input("Principal Name", value="Random Corp", key="principal_name")
-        if st.button("Register Principal", key="btn_pr"):
+        if st.button("Register Principal"):
             payload = {"name": principal_name}
             try:
                 res = requests.post(f"{API_URL}/principal/register", json=payload)
                 if res.status_code == 200:
                     data = res.json()
-                    st.success(f"✅ Principal registered! ID: {data['principal_id']}, TXID: {data['txid']}")
+                    show_status(True, f"Principal registered! ID: {data['principal_id']}, TXID: {data['txid']}")
                 else:
-                    st.error(f"❌ Error {res.status_code}: {res.text}")
+                    show_status(False, res.text)
             except Exception as e:
-                st.error(f"⚠️ Request failed: {e}")
+                show_status(False, str(e))
 
     with tab3:
         st.subheader("📝 Register Header")
-        principal_id = st.text_input("Principal ID (e.g., PR-1)", value="PR-1", key="header_principal")
-        header = st.text_input("Header (e.g., RND-HDR)", value="RND-HDR", key="header_input")
-        if st.button("Register Header", key="btn_header"):
+        principal_id = st.text_input("Principal ID", value="PR-1", key="header_principal")
+        header = st.text_input("Header", value="RND-HDR", key="header_input")
+        if st.button("Register Header"):
             payload = {"principal_id": principal_id, "header": header}
             try:
                 res = requests.post(f"{API_URL}/principal/register_header", json=payload)
                 if res.status_code == 200:
                     data = res.json()
-                    st.success(f"✅ Header '{header}' registered under {principal_id}! TXID: {data['txid']}")
+                    show_status(True, f"Header '{header}' registered under {principal_id}! TXID: {data['txid']}")
                 else:
-                    st.error(f"❌ Error {res.status_code}: {res.text}")
+                    show_status(False, res.text)
             except Exception as e:
-                st.error(f"⚠️ Request failed: {e}")
+                show_status(False, str(e))
 
 # -------------------- Send Consent Request --------------------
 elif menu == "Send Consent Request":
     st.header("📩 Send Consent Request")
-    st.write("Trigger consent acquisition for a customer via SMS.")
+    principal_id = st.text_input("Principal ID", value="PR-1")
+    header = st.text_input("Header", value="RND-HDR")
+    phone = st.text_input("Customer Phone", value="9876543210")
+    channel = st.selectbox("Channel", ["SMS", "VOICE"])
 
-    principal_id = st.text_input("Principal ID", value="PR-1", key="consent_req_principal")
-    header = st.text_input("Header ID", value="HDR-1", key="consent_req_header")
-    phone = st.text_input("Customer Phone", value="9876543210", key="consent_req_phone")
-    channel = st.selectbox("Channel", ["SMS", "VOICE"], key="consent_req_channel")
-
-    if st.button("Send Consent Request", key="btn_send_consent"):
+    if st.button("Send Consent Request"):
         payload = {"principal_id": principal_id, "header": header, "phone": phone}
         try:
             res = requests.post(f"{API_URL}/consent/request", json=payload)
             if res.status_code == 200:
                 data = res.json()
-                st.session_state.last_otp = data['otp']
-                st.success(f"✅ OTP sent successfully! (Demo OTP: {data['otp']})")
+                st.session_state.last_otp = data["otp"]
+                show_status(True, f"OTP sent! (Demo OTP: {data['otp']})")
             else:
-                st.error(f"❌ Error {res.status_code}: {res.text}")
+                show_status(False, res.text)
         except Exception as e:
-            st.error(f"⚠️ Request failed: {e}")
+            show_status(False, str(e))
 
 # -------------------- Grant Consent --------------------
 elif menu == "Grant Consent":
     st.header("🔐 Grant Consent")
     st.write("Validate OTP to register consent.")
 
-    with st.form("grant_consent_form"):
-        principal_id = st.text_input("Principal ID", value="PR-1", key="grant_principal")
-        header = st.text_input("Header ID", value="HDR-1", key="grant_header")
-        phone = st.text_input("Customer Phone", value="9876543210", key="grant_phone")
-        otp = st.text_input("Enter OTP", value=st.session_state.get("last_otp", "123456"), key="grant_otp")
+    with st.form("grant_form"):
+        principal_id = st.text_input("Principal ID", value="PR-1")
+        header = st.text_input("Header", value="RND-HDR")
+        phone = st.text_input("Customer Phone", value="9876543210")
+        otp = st.text_input("OTP", value=st.session_state.get("last_otp", "123456"))
         submitted = st.form_submit_button("Verify & Grant")
 
         if submitted:
@@ -127,11 +131,11 @@ elif menu == "Grant Consent":
             try:
                 res = requests.post(f"{API_URL}/consent/grant", json=payload)
                 if res.status_code == 200:
-                    st.success("✅ Consent granted successfully!")
+                    show_status(True, "Consent granted successfully!")
                 else:
-                    st.error(f"❌ Error {res.status_code}: {res.text}")
+                    show_status(False, res.text)
             except Exception as e:
-                st.error(f"⚠️ Request failed: {e}")
+                show_status(False, str(e))
 
 # -------------------- Customer Dashboard --------------------
 elif menu == "Customer Dashboard":
@@ -144,65 +148,54 @@ elif menu == "Customer Dashboard":
             st.session_state.phone = None
             st.rerun()
 
-        st.success(f"✅ Welcome, {st.session_state.phone}!")
-        st.subheader("📋 Your Consent Preferences")
-
+        st.success(f"Logged in as {st.session_state.phone}")
         try:
             res = requests.get(f"{API_URL}/consent/preferences/{st.session_state.phone}", headers=api_headers())
             if res.status_code == 200:
                 prefs = res.json()
                 if prefs:
                     for p in prefs:
-                        granted_at = p.get('granted_at', 'N/A')
-                        if granted_at != 'N/A':
+                        granted_at = p.get("granted_at", "N/A")
+                        if granted_at != "N/A":
                             try:
-                                parsed_time = datetime.fromisoformat(granted_at.replace('Z', '+00:00'))
-                                granted_at = parsed_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-                            except ValueError:
+                                granted_at = datetime.fromisoformat(granted_at.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S IST")
+                            except:
                                 pass
-                        st.write(f"**Company:** {p['principal_id']} | **Header:** {p['header']} | **Status:** {p['status']} | **Granted:** {granted_at}")
+                        st.write(f"**Company:** {p['principal_id']} | **Header:** {p['header']} | **Status:** {p['status']} | Granted: {granted_at}")
                         col1, col2 = st.columns(2)
                         with col1:
-                            if p['status'] == 'pending':
-                                if st.button(f"Approve {p['principal_id']}", key=f"approve_{p['principal_id']}_{p['header']}"):
-                                    update_payload = {"phone": st.session_state.phone, "principal_id": p['principal_id'], "header": p['header'], "status": "approved"}
-                                    update_res = requests.post(f"{API_URL}/consent/update", json=update_payload, headers=api_headers())
-                                    if update_res.status_code == 200:
-                                        st.success(f"✅ Approved consent for {p['principal_id']} ({p['header']})")
-                                        st.rerun()
-                                    else:
-                                        st.error(f"❌ Update failed: {update_res.text}")
+                            if st.button(f"Approve {p['principal_id']}", key=f"approve_{p['principal_id']}_{p['header']}"):
+                                update_payload = {"phone": st.session_state.phone, "principal_id": p['principal_id'], "header": p['header'], "status": "approved"}
+                                res = requests.post(f"{API_URL}/consent/update", json=update_payload, headers=api_headers())
+                                if res.status_code == 200:
+                                    show_status(True, f"Approved consent for {p['principal_id']}")
+                                    st.rerun()
+                                else:
+                                    show_status(False, res.text)
                         with col2:
                             if st.button(f"Revoke {p['principal_id']}", key=f"revoke_{p['principal_id']}_{p['header']}"):
                                 update_payload = {"phone": st.session_state.phone, "principal_id": p['principal_id'], "header": p['header'], "status": "revoked"}
-                                update_res = requests.post(f"{API_URL}/consent/update", json=update_payload, headers=api_headers())
-                                if update_res.status_code == 200:
-                                    st.warning(f"🚫 Revoked consent for {p['principal_id']} ({p['header']})")
+                                res = requests.post(f"{API_URL}/consent/update", json=update_payload, headers=api_headers())
+                                if res.status_code == 200:
+                                    show_status(True, f"Revoked consent for {p['principal_id']}")
                                     st.rerun()
                                 else:
-                                    st.error(f"❌ Update failed: {update_res.text}")
+                                    show_status(False, res.text)
                 else:
                     st.info("No consent preferences found.")
-            elif res.status_code == 401:
-                st.error("❌ Session expired. Please login again.")
-                st.session_state.token = None
-                st.session_state.phone = None
-                st.rerun()
             else:
-                st.error(f"❌ Error {res.status_code}: {res.text}")
+                st.error("Failed to fetch preferences.")
         except Exception as e:
-            st.error(f"⚠️ Failed to fetch preferences: {e}")
+            st.error(str(e))
             st.session_state.token = None
             st.session_state.phone = None
             st.rerun()
-
     else:
         tab1, tab2 = st.tabs(["Login", "Register"])
-
         with tab1:
-            phone = st.text_input("Phone Number", value="", key="login_phone")
-            password = st.text_input("Password", type="password", value="", key="login_password")
-            if st.button("Login", key="btn_login"):
+            phone = st.text_input("Phone Number", key="login_phone")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Login"):
                 payload = {"phone": phone, "password": password}
                 try:
                     res = requests.post(f"{API_URL}/users/login", json=payload)
@@ -210,17 +203,16 @@ elif menu == "Customer Dashboard":
                         data = res.json()
                         st.session_state.token = data.get("access_token")
                         st.session_state.phone = phone
-                        st.success(f"✅ Logged in as {phone}")
+                        show_status(True, f"Logged in as {phone}")
                         st.rerun()
                     else:
-                        st.error(f"❌ Login failed: {res.text}")
+                        show_status(False, res.text)
                 except Exception as e:
-                    st.error(f"⚠️ Login request failed: {e}")
-
+                    show_status(False, str(e))
         with tab2:
             reg_phone = st.text_input("Phone Number", key="reg_phone")
             reg_password = st.text_input("Password", type="password", key="reg_password")
-            if st.button("Register", key="btn_register"):
+            if st.button("Register"):
                 payload = {"phone": reg_phone, "password": reg_password}
                 try:
                     res = requests.post(f"{API_URL}/users/register", json=payload)
@@ -228,13 +220,14 @@ elif menu == "Customer Dashboard":
                         data = res.json()
                         st.session_state.token = data.get("access_token")
                         st.session_state.phone = reg_phone
-                        st.success(f"✅ Registered and logged in as {reg_phone}!")
+                        show_status(True, f"Registered and logged in as {reg_phone}")
                         st.rerun()
                     else:
-                        st.error(f"❌ Registration failed: {res.text}")
+                        show_status(False, res.text)
                 except Exception as e:
-                    st.error(f"⚠️ Registration request failed: {e}")
+                    show_status(False, str(e))
 
+# -------------------- View Ledger --------------------
 # -------------------- View Ledger --------------------
 elif menu == "View Ledger":
     st.header("📜 Ledger Records")
@@ -249,9 +242,7 @@ elif menu == "View Ledger":
     except Exception as e:
         st.error(f"⚠️ Request failed: {e}")
 
-# -------------------- TRAI Compliance Dashboard --------------------
-# -------------------- TRAI Compliance Dashboard --------------------
-# -------------------- TRAI Compliance Dashboard --------------------
+# -------------------- TRAI Compliance --------------------
 elif menu == "TRAI Compliance":
     st.header("📊 TRAI Compliance Dashboard")
     st.write("View consent statistics, SMS sends, blocks, and penalties for audit purposes.")
@@ -261,19 +252,30 @@ elif menu == "TRAI Compliance":
 
     if st.button("Generate Compliance Report"):
         try:
+            # Fetch ledger and report
             params = {
                 "from_date": from_date.isoformat() + "Z",
                 "to_date": to_date.isoformat() + "Z"
             }
             res = requests.get(f"{API_URL}/audit/report", params=params, headers=api_headers())
-            if res.status_code == 200:
+            ledger_res = requests.get(f"{API_URL}/ledger", headers=api_headers())
+
+            if res.status_code == 200 and ledger_res.status_code == 200:
                 report = res.json()
+                ledger_data = ledger_res.json()
+
+                # -------------------- Principals & Headers --------------------
+                principals = [tx for tx in ledger_data if tx['type'] == 'principal_register']
+                headers = [tx for tx in ledger_data if tx['type'] == 'header_register']
+                st.subheader("Entities Registered")
+                st.write(f"Total Principals Registered: {len(principals)}")  # Should be 7
+                st.write(f"Total Headers Registered: {len(headers)}")
 
                 # -------------------- Consent Summary --------------------
                 st.subheader("Consent Summary")
                 consent_stats = report.get("consent_stats", {})
-                total = sum(consent_stats.values())
-                st.write(f"Total Consent Requests: {total}")
+                total_consents = sum(consent_stats.values())
+                st.write(f"Total Consent Requests: {total_consents}")
                 st.write(f"Approved Consents: {consent_stats.get('approved', 0)}")
                 st.write(f"Pending Consents: {consent_stats.get('requested', 0)}")
                 st.write(f"Revoked Consents: {consent_stats.get('revoked', 0)}")
@@ -287,19 +289,14 @@ elif menu == "TRAI Compliance":
                 # -------------------- Transaction Summary --------------------
                 st.subheader("Transaction Summary")
                 summary = report.get("summary", {})
-                st.write(f"Total Transactions: {summary.get('total_transactions', 0)}")
+                st.write(f"Total Transactions: {summary.get('total_transactions', len(ledger_data))}")  # fallback to ledger
                 st.write(f"Transactions by Type: {summary.get('by_type', {})}")
 
                 # -------------------- Full Ledger --------------------
                 st.subheader("Full Ledger Entries")
-                # Fetch full ledger if you want detailed transactions
-                ledger_res = requests.get(f"{API_URL}/ledger", headers=api_headers())
-                if ledger_res.status_code == 200:
-                    ledger_data = ledger_res.json()
-                    st.dataframe(ledger_data)
-                else:
-                    st.warning("⚠️ Could not fetch full ledger entries.")
+                st.dataframe(ledger_data)
+
             else:
-                st.error(f"❌ Error {res.status_code}: {res.text}")
+                st.error(f"❌ Error fetching report or ledger: {res.status_code}/{ledger_res.status_code}")
         except Exception as e:
             st.error(f"⚠️ Failed to generate report: {e}")

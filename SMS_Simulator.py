@@ -26,7 +26,7 @@ if st.button("Send SMS"):
         res = requests.post(f"{API_URL}/sms/send", json=payload)
         if res.status_code == 200:
             data = res.json()
-            st.success(f"✅ SMS simulated successfully! TXID: {data['txid']}")
+            st.success(f"✅ SMS simulated successfully! TXID: {data.get('txid', 'N/A')}")
         else:
             st.error(f"❌ Error {res.status_code}: {res.text}")
     except Exception as e:
@@ -42,10 +42,14 @@ if st.button("Check Ledger"):
             sms_entries = [tx for tx in ledger if tx.get("type") in ["sms_sent", "sms_rejected"]]
             st.subheader("📜 SMS Ledger Entries")
             if sms_entries:
-                for tx in sms_entries[-5:]:  # last 5 entries
-                    status = "✅ Sent" if tx["type"]=="sms_sent" else "❌ Rejected"
-                    granted_at = tx.get("consent_granted_at", "N/A")
-                    st.write(f"**Phone Hash:** {tx['phone_hash'][:8]}... | **Principal:** {tx['principal_id']} | **Header:** {tx['header']} | **Operator:** {tx['operator']} | **Status:** {status} | **Consent Granted At:** {granted_at}")
+                for tx in sms_entries[-5:]:  # Last 5 entries
+                    status = "✅ Sent" if tx.get("type") == "sms_sent" else "❌ Rejected"
+                    phone_hash = tx.get("phone_hash", "N/A")[:8] + "..." if tx.get("phone_hash") else "N/A"
+                    principal = tx.get("principal_id", "N/A")
+                    header_tx = tx.get("header", "N/A")
+                    operator_tx = tx.get("operator", "N/A")  # Use get to avoid KeyError
+                    granted_at = tx.get("consent_granted_at", "N/A")  # This might not exist, so default to N/A
+                    st.write(f"**Phone Hash:** {phone_hash} | **Principal:** {principal} | **Header:** {header_tx} | **Operator:** {operator_tx} | **Status:** {status} | **Consent Granted At:** {granted_at}")
             else:
                 st.info("No SMS entries found in ledger.")
         else:
