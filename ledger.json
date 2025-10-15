@@ -1,0 +1,40 @@
+[
+  {
+    "type": "principal_register",
+    "principal_id": "PR-1",
+    "name": "Random Corp",
+    "timestamp": "2025-10-15T06:41:12.298387Z",
+    "txid": "3eb09936aa105fea121f72bfc5202c9a7a022ea4671edfc5ecbc5345876646f4"
+  },
+  {
+    "type": "header_register",
+    "principal_id": "PR-1",
+    "header": "RND-HDR",
+    "timestamp": "2025-10-15T06:41:12.302448Z",
+    "txid": "1b885409fe3fba019b82d20d893ec0d4845a077e2c42511a275add22eda2433b"
+  },
+  {
+    "type": "telemarketer_register",
+    "tm_id": "TM-1",
+    "name": "Random TM",
+    "trai_id": "TRAI-RND-123",
+    "timestamp": "2025-10-15T06:41:12.308930Z",
+    "txid": "1100f9684668edcefd49fb39409a43cf86b950b3970d418808d4344da207bee3"
+  },
+  {
+    "type": "consent_request",
+    "phone_hash": "7619ee8cea49187f309616e30ecf54be072259b43760f1f550a644945d5572f2",
+    "principal_id": "PR-1",
+    "header": "RND-HDR",
+    "timestamp": "2025-10-15T06:41:12.594630Z",
+    "txid": "1a652e333bb7798d5f3bba10f61dd137918977c20c5d1e5136b7ce95971bae1d"
+  },
+  {
+    "type": "consent_grant",
+    "phone_hash": "7619ee8cea49187f309616e30ecf54be072259b43760f1f550a644945d5572f2",
+    "principal_id": "PR-1",
+    "header": "RND-HDR",
+    "timestamp": "2025-10-15T06:41:12.599997Z",
+    "txid": "32fda1ff22586b7ba7614e98bcf76be58647b649aa1b5b3dc2454ddf8d799e30"
+  }
+]
