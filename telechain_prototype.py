@@ -475,13 +475,21 @@ class SMSSendContract:
 
 sms_send_contract = SMSSendContract()
 
+from datetime import datetime, timezone
+from collections import Counter
+from typing import Optional
+
+IST = timezone(timedelta(hours=5, minutes=30))  # Ensure IST timezone
+
 class TRAIAuditContract:
     def generate_report(self, from_date: Optional[str] = None, to_date: Optional[str] = None):
         chain = ledger.get_chain()
 
+        # Set default date range
         start = datetime.min.replace(tzinfo=IST)
         end = datetime.max.replace(tzinfo=IST)
 
+        # Parse from_date
         if from_date:
             try:
                 parsed = datetime.fromisoformat(from_date)
@@ -491,6 +499,7 @@ class TRAIAuditContract:
             except ValueError as e:
                 logger.warning(f"Invalid from_date '{from_date}': {e}. Using full range.")
 
+        # Parse to_date
         if to_date:
             try:
                 parsed = datetime.fromisoformat(to_date)
@@ -500,20 +509,33 @@ class TRAIAuditContract:
             except ValueError as e:
                 logger.warning(f"Invalid to_date '{to_date}': {e}. Using full range.")
 
+        # Helper: make timestamp tz-aware
+        def parse_tx_timestamp(ts: str):
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=IST)
+            return dt
+
+        # Filter chain based on date
         filtered_chain = [
             tx for tx in chain
-            if 'timestamp' in tx and start <= datetime.fromisoformat(tx['timestamp']) <= end
+            if 'timestamp' in tx and start <= parse_tx_timestamp(tx['timestamp']) <= end
         ]
 
-        # rest of your code remains the same
-        tx_types = Counter(tx['type'] for tx in filtered_chain)
+        # Counters
+        tx_types = Counter(tx.get('type') for tx in filtered_chain)
         consents_by_status = Counter()
         sms_rejections = Counter()
         telemarketer_activity = Counter()
         principal_activity = Counter()
 
+        # Collect simplified transactions
+        transactions = []
+
         for tx in filtered_chain:
             tx_type = tx.get('type')
+            
+            # Track counters
             if tx_type == 'consent_request':
                 consents_by_status['requested'] += 1
             elif tx_type == 'consent_grant':
@@ -531,6 +553,28 @@ class TRAIAuditContract:
                 pr_id = tx.get('principal_id', 'unknown')
                 principal_activity[pr_id] += 1
 
+            # Capture only relevant fields per tx
+            transactions.append({
+                "txid": tx.get("txid"),
+                "tm_id": tx.get("tm_id"),
+                "name": tx.get("name"),
+                "trai_id": tx.get("trai_id"),
+                "principal_id": tx.get("principal_id"),
+                "header": tx.get("header"),
+                "phone_hash": tx.get("phone_hash"),
+                "status": tx.get("status"),
+                "operator": tx.get("operator"),
+                "message_hash": tx.get("message_hash"),
+                "reason": tx.get("reason"),
+                "consent_granted_at": tx.get("consent_granted_at"),
+                "encrypted_message": tx.get("encrypted_message"),
+                "message_preview": tx.get("message_preview"),
+                "telemarketer_id": tx.get("telemarketer_id"),
+                "timestamp": tx.get("timestamp"),
+                "type": tx_type
+            })
+
+        # Build final report
         report = {
             "summary": {
                 "total_transactions": len(filtered_chain),
@@ -540,12 +584,15 @@ class TRAIAuditContract:
             "sms_rejections": dict(sms_rejections),
             "telemarketer_activity": dict(telemarketer_activity),
             "principal_activity": dict(principal_activity),
+            "transactions": transactions,
             "date_range": {
                 "from": start.isoformat(),
                 "to": end.isoformat()
             }
         }
+
         return report
+
 
 
 trai_audit_contract = TRAIAuditContract()

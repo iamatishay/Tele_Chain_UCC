@@ -363,7 +363,7 @@ elif menu == "Customer Dashboard":
                 except Exception as e:
                     show_status(False, str(e))
 
-
+# -------------------- View Ledger --------------------
 # -------------------- View Ledger --------------------
 elif menu == "View Ledger":
     st.header("📜 Ledger Records")
