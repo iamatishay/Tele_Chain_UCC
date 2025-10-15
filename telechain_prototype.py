@@ -34,6 +34,12 @@ from cryptography.hazmat.primitives import serialization, hashes
 from collections import Counter
 import logging
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_iso():
+    """Return current IST timestamp in ISO 8601 format"""
+    return datetime.now(IST).isoformat()
+
 # ----------------------------- Logging Setup -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -270,14 +276,30 @@ class RegistrationContract:
         return {"principal_id": pr_id, "txid": txid}
 
     def register_header(self, principal_id: str, header: str):
+    # Check if principal exists
         if principal_id not in DB['principals']:
             raise HTTPException(status_code=404, detail="Principal not found")
-        if header in DB['principals'][principal_id]['headers']:
-            raise HTTPException(status_code=400, detail="Header already registered for this principal")
+
+        # Check if the header already exists globally
+        for pid, pdata in DB['principals'].items():
+            if header in pdata.get('headers', []):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Header '{header}' already registered with another entity (Principal ID: {pid})"
+                )
+
+        # Add header to the principal
         DB['principals'][principal_id]['headers'].append(header)
         save_db()
-        txid = ledger.add_transaction({"type": "header_register", "principal_id": principal_id, "header": header})
+
+        # Add ledger transaction
+        txid = ledger.add_transaction({
+            "type": "header_register",
+            "principal_id": principal_id,
+            "header": header
+        })
         return {"header": header, "txid": txid}
+
 
 registration_contract = RegistrationContract()
 
@@ -348,7 +370,12 @@ class ConsentContract:
 
     def get_preferences(self, phone: str):
         key = sha256_hex(phone)
-        return DB['consents'].get(key, [])
+        prefs = DB['consents'].get(key, [])
+        for p in prefs:
+            principal_id = p.get("principal_id")
+            p["principal_name"] = DB['principals'].get(principal_id, {}).get("name", principal_id)
+        return prefs
+
 
 consent_contract = ConsentContract()
 
@@ -452,33 +479,33 @@ class TRAIAuditContract:
     def generate_report(self, from_date: Optional[str] = None, to_date: Optional[str] = None):
         chain = ledger.get_chain()
 
-        start = datetime.min.replace(tzinfo=timezone.utc)
-        end = datetime.max.replace(tzinfo=timezone.utc)
+        start = datetime.min.replace(tzinfo=IST)
+        end = datetime.max.replace(tzinfo=IST)
 
         if from_date:
             try:
-                date_str = str(from_date).strip()
-                if 'T' not in date_str:
-                    date_str = date_str.replace('Z', '') + 'T00:00:00Z'
-                parsed = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                start = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+                parsed = datetime.fromisoformat(from_date)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=IST)
+                start = parsed
             except ValueError as e:
                 logger.warning(f"Invalid from_date '{from_date}': {e}. Using full range.")
-                start = datetime.min.replace(tzinfo=timezone.utc)
 
         if to_date:
             try:
-                date_str = str(to_date).strip()
-                if 'T' not in date_str:
-                    date_str = date_str.replace('Z', '') + 'T23:59:59Z'
-                parsed = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                end = parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+                parsed = datetime.fromisoformat(to_date)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=IST)
+                end = parsed
             except ValueError as e:
                 logger.warning(f"Invalid to_date '{to_date}': {e}. Using full range.")
-                end = datetime.max.replace(tzinfo=timezone.utc)
 
-        filtered_chain = [tx for tx in chain if 'timestamp' in tx and start <= datetime.fromisoformat(tx['timestamp'].replace('Z', '+00:00')) <= end]
+        filtered_chain = [
+            tx for tx in chain
+            if 'timestamp' in tx and start <= datetime.fromisoformat(tx['timestamp']) <= end
+        ]
 
+        # rest of your code remains the same
         tx_types = Counter(tx['type'] for tx in filtered_chain)
         consents_by_status = Counter()
         sms_rejections = Counter()
@@ -514,11 +541,12 @@ class TRAIAuditContract:
             "telemarketer_activity": dict(telemarketer_activity),
             "principal_activity": dict(principal_activity),
             "date_range": {
-                "from": start.isoformat() + "Z",
-                "to": end.isoformat() + "Z"
+                "from": start.isoformat(),
+                "to": end.isoformat()
             }
         }
         return report
+
 
 trai_audit_contract = TRAIAuditContract()
 
