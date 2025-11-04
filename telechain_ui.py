@@ -5,7 +5,7 @@ from datetime import datetime
 API_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(page_title="📡 Telechain Prototype", layout="wide")
-st.title("📡 Telechain Prototype – Blockchain Consent Management")
+st.title("📡 ConsenSys Prototype – Blockchain Consent Management")
 
 
 # -------------------- Session State --------------------
