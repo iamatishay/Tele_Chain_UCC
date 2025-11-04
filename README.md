@@ -178,17 +178,6 @@ It may be adapted for telecom or enterprise-grade integration under suitable lic
 
 ## 📸 Prototype Screens
 
-| Ledger Trace                                                                                                           | Consent Flow                                                                                                           | Entity Registry                                                                                                        |
-| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| <img width="680" height="414" src="https://github.com/user-attachments/assets/b030d823-55d5-4dac-b6f7-e754fb21510b" /> | <img width="944" height="415" src="https://github.com/user-attachments/assets/e17a5a28-7d49-43e6-bb14-369c34acc57b" /> | <img width="805" height="371" src="https://github.com/user-attachments/assets/4217a36d-f748-41a8-beb1-9e26a1f4882f" /> |
-
-| Audit Dashboard                                                                                                        | Scrubbing                                                                                                              | Principal Registry                                                                                                     |
-| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| <img width="947" height="413" src="https://github.com/user-attachments/assets/9d7729cd-788f-4d1c-8ecc-b34ec1471c4b" /> | <img width="950" height="341" src="https://github.com/user-attachments/assets/eff57930-7672-4f8e-bd60-8363ca25c3b2" /> | <img width="874" height="416" src="https://github.com/user-attachments/assets/5c367359-2fdf-4512-8544-8ce9276b5fc5" /> |
-
-| Consent Analytics                                                                                                      | Audit Log |
-| ---------------------------------------------------------------------------------------------------------------------- | --------- |
-| <img width="939" height="412" src="https://github.com/user-attachments/assets/d8e1e0d2-49d2-4008-acb1-0262d660fff0" /> |           |
-
----
-
+<img width="680" height="414" src="https://github.com/user-attachments/assets/b030d823-55d5-4dac-b6f7-e754fb21510b" />	<img width="944" height="415" src="https://github.com/user-attachments/assets/e17a5a28-7d49-43e6-bb14-369c34acc57b" />	<img width="805" height="371" src="https://github.com/user-attachments/assets/4217a36d-f748-41a8-beb1-9e26a1f4882f" />
+<img width="947" height="413" src="https://github.com/user-attachments/assets/9d7729cd-788f-4d1c-8ecc-b34ec1471c4b" />	<img width="950" height="341" src="https://github.com/user-attachments/assets/eff57930-7672-4f8e-bd60-8363ca25c3b2" />	<img width="874" height="416" src="https://github.com/user-attachments/assets/5c367359-2fdf-4512-8544-8ce9276b5fc5" />
+<img width="939" height="412" src="https://github.com/user-attachments/assets/d8e1e0d2-49d2-4008-acb1-0262d660fff0" />	
